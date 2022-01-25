@@ -55,8 +55,7 @@ func NewWorker(kind uint8, length uint16) *Worker {
 func (w *Worker) monitorAdd() {
 	var i uint16
 	for i = 0; i < w.Cap; i++ {
-		w.Entry[i].code = i
-		w.Entry[i].Head = &Job{}
+		w.Entry = append(w.Entry,&WorkerEntry{code:i,Head:&Job{}})
 	}
 
 	for {
@@ -77,6 +76,9 @@ func (w *Worker) monitorAdd() {
 
 // 增加任务
 func (w *Worker) Add(weight int8, time int, cmd func()) error {
+	if weight <= 0 {
+		return fmt.Errorf("Add job error,weight can not is 0 ... ")
+	}
 	job := &Job{
 		Func:   cmd,
 		Weight: weight,
@@ -95,7 +97,10 @@ func (w *Worker) Add(weight int8, time int, cmd func()) error {
 
 // 动态加载
 func (s *WorkerEntry) addJob(job *Job) {
-
+	err := insertNode(s.Head, job)
+	if err !=nil {
+		fmt.Println(err)
+	}
 }
 
 // 开始执行
@@ -104,10 +109,16 @@ func (w *Worker) Start() error {
 		return fmt.Errorf("Worker is already running ... ")
 	} else {
 		w.Running = true
+		// close monitor
+		w.C <- &Job{}
 	}
-	for _, v := range w.Entry {
-		v.list()
-	}
+	go func() {
+		for  {
+			for _, v := range w.Entry {
+				go v.list()
+			}
+		}
+	}()
 	return nil
 }
 
