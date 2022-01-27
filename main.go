@@ -6,22 +6,35 @@ import (
 	"time"
 )
 
+type edr struct {
+	Num int
+}
+type edr2 struct {
+	Num int
+}
+
 func main() {
+	var edrS = &edr{Num:0}
+	var edr2 = &edr2{Num:0}
 	wk := schedule.NewWorker(1, 100)
-	for i := 1; i < 999; i++ {
-		_ = wk.Add(uint8(i), 50, test)
+	for i := 1; i < 9999; i++ {
+		_ = wk.Add(uint8(i), 50, edrS)
 	}
 	wk.Start()
-	wk.Add(200,50,test1)
+	wk.Add(200,50, edr2)
+	time.Sleep(2 * time.Second)
+	//wk.Stop()
 	time.Sleep(10 * time.Second)
 }
 
-func test() {
-	fmt.Println("--------------")
+func (e *edr)TaskFunc(args ...interface{}) {
+	fmt.Println("--------------",e.Num)
+	e.Num++
 	time.Sleep(500 * time.Millisecond)
 }
 
-func test1(){
-	fmt.Println("+++++++++++++++++")
+func (e *edr2)TaskFunc(args ...interface{}){
+	fmt.Println("+++++++++++++++++",e.Num)
+	e.Num++
 	time.Sleep(50 * time.Millisecond)
 }

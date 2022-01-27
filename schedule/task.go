@@ -1,6 +1,7 @@
 package schedule
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -12,16 +13,21 @@ import (
 */
 
 type Worker struct {
-	Kind    uint8          `json:"kind"`
-	Cap     uint16         `json:"cap"`
-	C       chan *Job      `json:"channel"`
-	Entry   []*WorkerEntry `json:"Entry"`
-	Code    uint16         `json:"code"`
-	Running bool           `json:"running"`
-	Monitor bool           `json:"monitor"`
+	Kind    uint8              `json:"kind"`
+	Cap     uint16             `json:"cap"`
+	C       chan *Job          `json:"channel"`
+	Entry   []*WorkerEntry     `json:"Entry"`
+	Code    uint16             `json:"code"`
+	Running bool               `json:"running"`
+	Monitor bool               `json:"monitor"`
+	ExecNum int32              `json:"exec_num"`
+	ExecSig chan uint          `json:"exec_sig"`
+	Ctx     context.Context    `json:"ctx"`
+	Cancel  context.CancelFunc `json:"cancel"`
 }
 
-type WorkerApi interface {
+type WorkerFunc interface {
+	TaskFunc(args ...interface{})
 }
 
 // 任务单条队列
@@ -36,7 +42,7 @@ type WorkerEntry struct {
 
 // 任务结构体
 type Job struct {
-	Func     func()
+	Func     WorkerFunc
 	Weight   uint8
 	ExecTime time.Duration
 	pre      *Job
@@ -50,6 +56,8 @@ func NewWorker(kind uint8, length uint16) *Worker {
 	worker.Code = 0x00
 	worker.Running = false
 	worker.C = make(chan *Job)
+	worker.ExecSig = make(chan uint)
+	worker.Ctx, worker.Cancel = context.WithCancel(context.Background())
 
 	go worker.monitorAdd()
 
@@ -73,7 +81,6 @@ func (w *Worker) monitorAdd() {
 		}
 		if w.Code < w.Cap {
 			w.Entry[w.Code].addJob(job)
-
 		} else {
 			w.Code = 0x00
 			w.Entry[w.Code].addJob(job)
@@ -83,7 +90,7 @@ func (w *Worker) monitorAdd() {
 }
 
 // 增加任务
-func (w *Worker) Add(weight uint8, time int, cmd func()) error {
+func (w *Worker) Add(weight uint8, time int, cmd WorkerFunc) error {
 	if weight <= 0 {
 		return fmt.Errorf("Add job error,weight can not is 0 ... ")
 	}
@@ -109,7 +116,7 @@ func (s *WorkerEntry) addJob(job *Job) {
 	if err != nil {
 		fmt.Println(err)
 	}
-	atomic.AddInt32(&s.WaitJobNum,1)
+	atomic.AddInt32(&s.WaitJobNum, 1)
 }
 
 // 动态加载
@@ -136,32 +143,65 @@ func (w *Worker) Start() error {
 	if w.Running {
 		return fmt.Errorf("Worker is already running ... ")
 	} else {
-		w.Running = true
+		w.Running = !w.Running
 		// close monitor
 		w.C <- &Job{}
 	}
 	go func() {
 		for {
-			for _, v := range w.Entry {
-				go func() {
-					if v.WaitJobNum <= 0 || v.Head.next == nil {
-						v.Running = false
-						v.WaitJobNum = 0
-						return
-					} else if v.Running {
-						return
-					} else {
-						v.list()
+			select {
+			case <-w.Ctx.Done():
+				return
+			case <-w.ExecSig:
+				for {
+					if uint16(w.ExecNum) < w.Cap && w.ExecNum >= 0 {
+						w.C <- &Job{}
+						break
 					}
-				}()
+				}
+			}
+		}
+	}()
+	go func() {
+		for {
+			if w.Monitor {
+				continue
+			}
+			for _, v := range w.Entry {
+				//v.showCode()
+				w.ExecSig <- uint(0x01)
+				select {
+				case <-w.C:
+					go func(s *WorkerEntry) {
+						if s.WaitJobNum <= 0 || s.Head.next == nil {
+							s.Running = false
+							s.WaitJobNum = 0
+							return
+						} else if s.Running {
+							return
+						} else {
+							atomic.AddInt32(&w.ExecNum, 1)
+							s.list(w.Ctx)
+							atomic.AddInt32(&w.ExecNum, -1)
+						}
+					}(v)
+				case <-w.Ctx.Done():
+					return
+				}
 			}
 		}
 	}()
 	return nil
 }
 
+func (w *Worker) ShowJob() {
+	for key := range w.Entry {
+		fmt.Println(w.Entry[key].getJobNode())
+	}
+}
+
 // 队列执行
-func (s *WorkerEntry) list() {
+func (s *WorkerEntry) list(ctx context.Context) {
 	s.Running = true
 	listBegin := time.Now()
 	show := s.Head
@@ -175,22 +215,27 @@ func (s *WorkerEntry) list() {
 			s.ExecTime = time.Now().Sub(listBegin)
 			return
 		}
-		show = show.next
-		before := time.Now()
-		//s.showCode()
-		show.Func()
-		show.ExecTime = time.Now().Sub(before)
-		s.delLinksNode(show)
-		if s.WaitJobNum != 0 {
-			atomic.AddInt32(&s.WaitJobNum, -1)
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			show = show.next
+			before := time.Now()
+			//s.showCode()
+			show.Func.TaskFunc()
+			show.ExecTime = time.Now().Sub(before)
+			s.delLinksNode(show)
+			if s.WaitJobNum != 0 {
+				atomic.AddInt32(&s.WaitJobNum, -1)
+			}
+			fmt.Println(s.code, ".........", s.WaitJobNum)
 		}
-		fmt.Println(s.code,".........",s.WaitJobNum)
 	}
 }
 
 // show routine code
 func (s *WorkerEntry) showCode() {
-	fmt.Println("Execute routine code :", s.code)
+	fmt.Println("Execute routine code :", s.code, " Job number is ", s.WaitJobNum)
 }
 
 func (w *Worker) SetCap(size uint16) error {
@@ -202,7 +247,10 @@ func (w *Worker) SetCap(size uint16) error {
 }
 
 func (w *Worker) Stop() {
-
+	w.Monitor = true
+	w.Running = false
+	w.ExecNum = 0
+	w.Cancel()
 }
 
 // 销毁
@@ -289,7 +337,7 @@ func (s *WorkerEntry) getJobNode() []*Job {
 func (s *WorkerEntry) delLinksNode(job *Job) *Job {
 	s.Lock.Lock()
 	defer s.Lock.Unlock()
-	fmt.Println("del node ",job.Weight)
+	fmt.Println("del node ", job.Weight)
 	temp := s.Head
 	if temp.next == nil {
 		return job
@@ -299,9 +347,9 @@ func (s *WorkerEntry) delLinksNode(job *Job) *Job {
 	for {
 		//s.showCode()
 		if temp.next == nil {
-			fmt.Println("Del node error , node not exist ... error pointer is ",s.code," error pointer num is ",s.WaitJobNum," weight is ",job.Weight)
+			fmt.Println("Del node error , node not exist ... error pointer is ", s.code, " error pointer num is ", s.WaitJobNum, " weight is ", job.Weight)
 			return job
-		} else if temp.next.Weight == job.Weight {
+		} else if temp.next == job {
 			// is last
 			if temp.next.next == nil {
 				last = true
