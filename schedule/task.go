@@ -25,6 +25,12 @@ type Worker struct {
 	Ctx     context.Context    `json:"ctx"`
 	Cancel  context.CancelFunc `json:"cancel"`
 }
+type WorkerApi struct {
+	f WorkerFuncS
+	args []interface{}
+}
+
+type WorkerFuncS func(args ...interface{})
 
 type WorkerFunc interface {
 	TaskFunc(args ...interface{})
@@ -108,6 +114,14 @@ func (w *Worker) Add(weight uint8, time int, cmd WorkerFunc) error {
 	}
 
 	return nil
+}
+
+// 增加闭包任务
+func (w *Worker) AddClosureFunc(weight uint8, time int, cmd func(args ...interface{}), args ...interface{}) error {
+	var wa WorkerApi
+	wa.f = cmd
+	wa.args = args
+	return w.Add(weight, time, &wa)
 }
 
 // 按队列增加任务
@@ -366,4 +380,8 @@ func (s *WorkerEntry) delLinksNode(job *Job) *Job {
 		temp.next.pre = temp
 	}
 	return job
+}
+
+func (e *WorkerApi) TaskFunc(args ...interface{}) {
+	e.f(e.args...)
 }

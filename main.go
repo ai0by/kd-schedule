@@ -21,7 +21,19 @@ func main() {
 		_ = wk.Add(uint8(i), 50, edrS)
 	}
 	wk.Start()
+	// 实现接口增加任务
 	wk.Add(200,50, edr2)
+	// 闭包带参数任务
+	wk.AddClosureFunc(199,50, func(args ...interface{}) {
+		for _,v := range args{
+			fmt.Println(v.(string))
+		}
+	},"~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+	wk.AddClosureFunc(199,50, func(args ...interface{}) {
+		for _,v := range args{
+			fmt.Println(v.(string))
+		}
+	},"---------------------------")
 	time.Sleep(2 * time.Second)
 	//wk.Stop()
 	time.Sleep(10 * time.Second)
