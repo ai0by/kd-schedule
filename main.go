@@ -17,10 +17,11 @@ func main() {
 	var edrS = &edr{Num:0}
 	var edr2 = &edr2{Num:0}
 	wk := schedule.NewWorker(1, 100)
+
+	wk.Start()
 	for i := 1; i < 9999; i++ {
 		_ = wk.Add(uint8(i), 50, edrS)
 	}
-	wk.Start()
 	// 实现接口增加任务
 	wk.Add(200,50, edr2)
 	// 闭包带参数任务
@@ -36,7 +37,8 @@ func main() {
 	},"---------------------------")
 	time.Sleep(2 * time.Second)
 	//wk.Stop()
-	time.Sleep(10 * time.Second)
+	var cc = make(chan int)
+	<-cc
 }
 
 func (e *edr)TaskFunc(args ...interface{}) {

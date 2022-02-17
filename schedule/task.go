@@ -26,7 +26,7 @@ type Worker struct {
 	Cancel  context.CancelFunc `json:"cancel"`
 }
 type WorkerApi struct {
-	f WorkerFuncS
+	f    WorkerFuncS
 	args []interface{}
 }
 
@@ -130,7 +130,6 @@ func (s *WorkerEntry) addJob(job *Job) {
 	if err != nil {
 		fmt.Println(err)
 	}
-	atomic.AddInt32(&s.WaitJobNum, 1)
 }
 
 // 动态加载
@@ -326,6 +325,7 @@ func (s *WorkerEntry) insertNode(job *Job) error {
 		job.next.pre = job
 		job.pre = temp
 	}
+	atomic.AddInt32(&s.WaitJobNum, 1)
 	return nil
 }
 
