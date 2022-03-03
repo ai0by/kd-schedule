@@ -22,13 +22,22 @@ type Worker struct {
 	Monitor bool               `json:"monitor"`
 	ExecNum int32              `json:"exec_num"`
 	ExecSig chan uint          `json:"exec_sig"`
+	ReSig   chan uint          `json:"exec_sig"`
 	Ctx     context.Context    `json:"ctx"`
 	Cancel  context.CancelFunc `json:"cancel"`
+	JobCode chan uint16        `json:"job_code"`
 }
 
 type WorkerFunc interface {
 	TaskFunc(args ...interface{})
 }
+
+type WorkerApi struct {
+	f WorkerFuncS
+	args []interface{}
+}
+
+type WorkerFuncS func(args ...interface{})
 
 // 任务单条队列
 type WorkerEntry struct {
@@ -49,6 +58,8 @@ type Job struct {
 	next     *Job
 }
 
+var execNumber = 0
+
 func NewWorker(kind uint8, length uint16) *Worker {
 	worker := new(Worker)
 	worker.Kind = kind
@@ -57,6 +68,8 @@ func NewWorker(kind uint8, length uint16) *Worker {
 	worker.Running = false
 	worker.C = make(chan *Job)
 	worker.ExecSig = make(chan uint)
+	worker.ReSig = make(chan uint)
+	worker.JobCode = make(chan uint16, length)
 	worker.Ctx, worker.Cancel = context.WithCancel(context.Background())
 
 	go worker.monitorAdd()
@@ -110,31 +123,50 @@ func (w *Worker) Add(weight uint8, time int, cmd WorkerFunc) error {
 	return nil
 }
 
+// 增加闭包任务
+func (w *Worker) AddClosureFunc(weight uint8, time int, cmd func(args ...interface{}), args ...interface{}) error {
+	var wa WorkerApi
+	wa.f = cmd
+	wa.args = args
+	return w.Add(weight, time, &wa)
+}
+
 // 按队列增加任务
 func (s *WorkerEntry) addJob(job *Job) {
 	err := s.insertNode(job)
 	if err != nil {
 		fmt.Println(err)
 	}
-	atomic.AddInt32(&s.WaitJobNum, 1)
 }
 
 // 动态加载
 func (w *Worker) realTimeAdd(job *Job) error {
 	// find free queue or find small amount of task
-	var fewCode uint16
-	var fewNum int32
-	for k := range w.Entry {
-		if !w.Entry[k].Running {
-			err := w.Entry[k].insertNode(job)
-			return err
+	var fewCode = w.Entry[0x01].code
+	var fewNum = w.Entry[0x01].WaitJobNum
+	k := w.Code
+	for {
+		if k >= w.Cap {
+			k = 0x01
+		}
+
+		if w.Entry[k].WaitJobNum == 0 {
+			w.Code = k
+			break
+		}
+		if k == w.Code-1 {
+			w.Code = fewCode
+			break
 		}
 		if w.Entry[k].WaitJobNum < fewNum {
 			fewCode = w.Entry[k].code
 			fewNum = w.Entry[k].WaitJobNum
 		}
+		k++
 	}
-	err := w.Entry[fewCode].insertNode(job)
+	err := w.Entry[w.Code].insertNode(job)
+	w.JobCode <- w.Code
+	w.Code++
 	return err
 }
 
@@ -147,16 +179,29 @@ func (w *Worker) Start() error {
 		// close monitor
 		w.C <- &Job{}
 	}
+
+	for _, v := range w.Entry {
+		atomic.AddInt32(&w.ExecNum, 1)
+		if v.WaitJobNum <= 0 || v.Head.next == nil {
+			v.Running = false
+			v.WaitJobNum = 0
+			continue
+		} else {
+			v.list(w.Ctx)
+		}
+		atomic.AddInt32(&w.ExecNum, -1)
+	}
+	fmt.Println("start monitor ...")
 	go func() {
+		fooTicker := time.NewTicker(20 * time.Second)
 		for {
 			select {
 			case <-w.Ctx.Done():
 				return
-			case <-w.ExecSig:
-				for {
-					if uint16(w.ExecNum) < w.Cap && w.ExecNum >= 0 {
-						w.C <- &Job{}
-						break
+			case <-fooTicker.C:
+				for k := range w.Entry{
+					if w.Entry[k].WaitJobNum > 0 {
+						w.JobCode <- w.Entry[k].code
 					}
 				}
 			}
@@ -167,27 +212,35 @@ func (w *Worker) Start() error {
 			if w.Monitor {
 				continue
 			}
-			for _, v := range w.Entry {
-				//v.showCode()
-				w.ExecSig <- uint(0x01)
-				select {
-				case <-w.C:
-					go func(s *WorkerEntry) {
-						if s.WaitJobNum <= 0 || s.Head.next == nil {
-							s.Running = false
-							s.WaitJobNum = 0
-							return
-						} else if s.Running {
-							return
-						} else {
-							atomic.AddInt32(&w.ExecNum, 1)
-							s.list(w.Ctx)
-							atomic.AddInt32(&w.ExecNum, -1)
+			select {
+			case code := <-w.JobCode:
+				if uint16(w.ExecNum) > w.Cap {
+					for {
+						if uint16(w.ExecNum) <= w.Cap {
+							break
+						}else{
+							time.Sleep(10 * time.Millisecond)
 						}
-					}(v)
-				case <-w.Ctx.Done():
-					return
+					}
 				}
+				go func(s *WorkerEntry) {
+					atomic.AddInt32(&w.ExecNum, 1)
+					defer func() {
+						atomic.AddInt32(&w.ExecNum, -1)
+					}()
+					if s.WaitJobNum <= 0 || s.Head.next == nil {
+						s.Running = false
+						s.WaitJobNum = 0
+						return
+					} else if s.Running {
+						return
+					} else {
+						s.list(w.Ctx)
+					}
+				}(w.Entry[code])
+			case <-w.Ctx.Done():
+				return
+
 			}
 		}
 	}()
@@ -200,9 +253,25 @@ func (w *Worker) ShowJob() {
 	}
 }
 
+func (w *Worker) ShowStatus() {
+	fmt.Println("ExecNum:", w.ExecNum)
+	fmt.Println("Code:", w.Code)
+	fmt.Println("Monitor:", w.Monitor)
+	fmt.Println("Running:", w.Running)
+	fmt.Println("Cap:", w.Cap)
+	var waitNumber int32
+	for k := range w.Entry {
+		waitNumber += w.Entry[k].WaitJobNum
+	}
+	fmt.Println("waitJob:", waitNumber)
+}
+
 // 队列执行
 func (s *WorkerEntry) list(ctx context.Context) {
 	s.Running = true
+	defer func() {
+		s.Running = false
+	}()
 	listBegin := time.Now()
 	show := s.Head
 	// is empty
@@ -228,7 +297,8 @@ func (s *WorkerEntry) list(ctx context.Context) {
 			if s.WaitJobNum != 0 {
 				atomic.AddInt32(&s.WaitJobNum, -1)
 			}
-			fmt.Println(s.code, ".........", s.WaitJobNum)
+			//fmt.Println(s.code, ".........", s.WaitJobNum, ".........", execNumber)
+			execNumber++
 		}
 	}
 }
@@ -312,11 +382,13 @@ func (s *WorkerEntry) insertNode(job *Job) error {
 		job.next.pre = job
 		job.pre = temp
 	}
+	atomic.AddInt32(&s.WaitJobNum, 1)
 	return nil
 }
 
 // show all links node
 func (s *WorkerEntry) getJobNode() []*Job {
+	fmt.Println(s.code)
 	var jobs []*Job
 	show := s.Head
 	// is empty
@@ -337,7 +409,7 @@ func (s *WorkerEntry) getJobNode() []*Job {
 func (s *WorkerEntry) delLinksNode(job *Job) *Job {
 	s.Lock.Lock()
 	defer s.Lock.Unlock()
-	fmt.Println("del node ", job.Weight)
+	//fmt.Println("del node ", job.Weight)
 	temp := s.Head
 	if temp.next == nil {
 		return job
@@ -366,4 +438,9 @@ func (s *WorkerEntry) delLinksNode(job *Job) *Job {
 		temp.next.pre = temp
 	}
 	return job
+}
+
+
+func (e *WorkerApi) TaskFunc(args ...interface{}) {
+	e.f(e.args...)
 }
