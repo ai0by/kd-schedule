@@ -28,6 +28,8 @@ type Worker struct {
 	JobCode chan uint16        `json:"job_code"`
 }
 
+type WorkerFuncS func(args ...interface{})
+
 type WorkerFunc interface {
 	TaskFunc(args ...interface{})
 }
@@ -37,7 +39,6 @@ type WorkerApi struct {
 	args []interface{}
 }
 
-type WorkerFuncS func(args ...interface{})
 
 // 任务单条队列
 type WorkerEntry struct {
